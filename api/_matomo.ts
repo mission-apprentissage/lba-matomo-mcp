@@ -38,8 +38,9 @@ export function currentAccess(): Access {
 }
 
 export class MatomoApiError extends Error {
-  constructor(message: string, readonly method: string) {
-    super(`Matomo TagManager.${method} : ${message}`);
+  /** apiMethod : nom complet, ex. TagManager.getContainer ou Events.getCategory. */
+  constructor(message: string, readonly apiMethod: string) {
+    super(`Matomo ${apiMethod} : ${message}`);
     this.name = "MatomoApiError";
   }
 }
@@ -121,13 +122,24 @@ const WRITE_METHODS = new Set([
   "createContainerVersion", "publishContainerVersion",
 ]);
 
-export async function call<T = unknown>(method: string, params: Params = {}, scope: Scope = "container"): Promise<T> {
+/** Appel d'une méthode TagManager (nom court, ex. getContainer). */
+export function call<T = unknown>(method: string, params: Params = {}, scope: Scope = "container"): Promise<T> {
+  return request<T>(`TagManager.${method}`, params, scope);
+}
+
+/**
+ * Appel bas niveau de l'API Matomo (nom complet, ex. Events.getCategory). Les gardes d'écriture
+ * s'appliquent ici pour qu'aucun module (cf. _reporting.ts) ne puisse les contourner.
+ */
+export async function request<T = unknown>(apiMethod: string, params: Params = {}, scope: Scope = "container"): Promise<T> {
   const cfg = getConfig();
-  if (WRITE_METHODS.has(method) && currentAccess() !== "write") throw new ReadOnlyError(method);
-  if (!cfg.token) throw new MatomoApiError("MATOMO_TOKEN non configuré", method);
+  const method = apiMethod.startsWith("TagManager.") ? apiMethod.slice("TagManager.".length) : "";
+  const isWrite = WRITE_METHODS.has(method);
+  if (isWrite && currentAccess() !== "write") throw new ReadOnlyError(method);
+  if (!cfg.token) throw new MatomoApiError("MATOMO_TOKEN non configuré", apiMethod);
 
   // Site, conteneur et méthode viennent toujours de la configuration, jamais des paramètres d'un outil.
-  const fields: Params = { ...params, module: "API", format: "json", method: `TagManager.${method}` };
+  const fields: Params = { ...params, module: "API", format: "json", method: apiMethod };
   delete fields.idSite;
   delete fields.idContainer;
   if (scope !== "global") fields.idSite = cfg.idSite;
@@ -135,8 +147,8 @@ export async function call<T = unknown>(method: string, params: Params = {}, sco
   const body = encodeParams(fields);
 
   // Une valeur relue via le MCP a ses e-mails masqués (cf. redact) : la réécrire remplacerait l'adresse d'origine.
-  if (WRITE_METHODS.has(method) && [...body.values()].some((v) => v.includes(EMAIL_MASK))) {
-    throw new MatomoApiError(`un paramètre contient « ${EMAIL_MASK} », texte masqué par une lecture : renvoyer la valeur d'origine ou omettre le champ`, method);
+  if (isWrite && [...body.values()].some((v) => v.includes(EMAIL_MASK))) {
+    throw new MatomoApiError(`un paramètre contient « ${EMAIL_MASK} », texte masqué par une lecture : renvoyer la valeur d'origine ou omettre le champ`, apiMethod);
   }
 
   const res = await fetch(cfg.endpoint, {
@@ -152,20 +164,20 @@ export async function call<T = unknown>(method: string, params: Params = {}, sco
 
   const text = await res.text();
   if (!res.ok) {
-    throw new MatomoApiError(`HTTP ${res.status} — ${scrubToken(text.slice(0, 300), cfg.token)}`, method);
+    throw new MatomoApiError(`HTTP ${res.status} — ${scrubToken(text.slice(0, 300), cfg.token)}`, apiMethod);
   }
 
   let data: unknown;
   try {
     data = JSON.parse(text);
   } catch {
-    throw new MatomoApiError(`réponse non JSON — ${scrubToken(text.slice(0, 300), cfg.token)}`, method);
+    throw new MatomoApiError(`réponse non JSON — ${scrubToken(text.slice(0, 300), cfg.token)}`, apiMethod);
   }
 
   // Matomo renvoie ses erreurs (droits, validation) en HTTP 200 avec ce corps.
   if (data && typeof data === "object" && !Array.isArray(data) && (data as { result?: unknown }).result === "error") {
     const message = String((data as { message?: unknown }).message ?? "erreur sans message");
-    throw new MatomoApiError(scrubToken(message, cfg.token), method);
+    throw new MatomoApiError(scrubToken(message, cfg.token), apiMethod);
   }
   return data as T;
 }
@@ -240,7 +252,7 @@ export async function getDraftVersionId(): Promise<number> {
   const container = await getContainer();
   const id = Number(container?.draft?.idcontainerversion);
   if (!Number.isInteger(id) || id <= 0) {
-    throw new MatomoApiError("brouillon introuvable (draft.idcontainerversion absent)", "getContainer");
+    throw new MatomoApiError("brouillon introuvable (draft.idcontainerversion absent)", "TagManager.getContainer");
   }
   return id;
 }

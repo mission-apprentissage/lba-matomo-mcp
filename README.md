@@ -1,6 +1,6 @@
 # lba-matomo-mcp
 
-Serveur MCP (Streamable HTTP, Vercel) qui pilote le conteneur Matomo Tag Manager de La bonne alternance (`s4n03ZE1`, site 7 sur `stats.beta.gouv.fr`) via l'API HTTP `TagManager.*`.
+Serveur MCP (Streamable HTTP, Vercel) qui pilote le conteneur Matomo Tag Manager de La bonne alternance (`s4n03ZE1`, site 7 sur `stats.beta.gouv.fr`) via l'API HTTP `TagManager.*`, et lit les statistiques agrégées du site via l'API de reporting.
 
 Les écritures visent uniquement le **brouillon** du conteneur. Rien n'atteint les internautes avant `create_version` puis `publish_version` sur `live`.
 
@@ -29,5 +29,6 @@ Pour couper l'écriture : supprimer ou changer `MCP_WRITE_SECRET` sur Vercel, pu
 ## Outils
 
 - Lecture : `get_container`, `list_versions`, `get_version`, `list_triggers`, `get_trigger`, `list_tags`, `get_tag`, `list_variables`, `get_variable`, `get_references`, `find_orphan_triggers`, `export_version`, `list_reference_data`.
+- Statistiques (agrégats, lecture) : `list_reports`, `list_goals_and_dimensions`, `get_report` (liste blanche de rapports : trafic, pages, événements, acquisition, objectifs, dimensions, audience ; pas de `Live`), `check_tag_activity` (balises de la version live croisées avec les événements reçus).
 - Haut niveau : `track_custom_event` (déclencheur `dl__<event>` + balise `<catégorie>__<action>`, `dry_run` pour voir le plan).
 - Écriture, avec `MCP_WRITE_SECRET` : `add_|update_|delete_` + `trigger|tag|variable`, `pause_tag`, `resume_tag`, `create_version`, `publish_version` (`dev` par défaut, `live` exige `confirm_live=true`).

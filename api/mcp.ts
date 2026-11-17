@@ -4,6 +4,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import * as m from "./_matomo";
+import * as r from "./_reporting";
 
 type ToolResult = { content: { type: "text"; text: string }[]; isError?: boolean };
 
@@ -181,6 +182,91 @@ export function buildMcpServer(access: m.Access = "read"): McpServer {
         contexts: m.getAvailableContexts,
       };
       return json(kind, await fetchers[kind]());
+    }),
+  );
+
+  // ─── statistiques (agrégats uniquement) ────────────────────────────────────
+
+  const period = z.enum(r.PERIODS).describe("day, week, month, year, ou range (date = intervalle ou lastN)");
+  const date = z.string().regex(r.DATE_RE).describe("today, yesterday, last30, previous7, 2026-11-01, ou 2026-11-01,2026-11-17. Les chiffres du jour peuvent être incomplets (calcul périodique) : préférer yesterday ou lastN.");
+  const limit = z.number().int().min(1).max(500).optional().default(50).describe("Nombre de lignes par période (filter_limit)");
+  const segment = z.string().max(500).optional().describe("Segment Matomo, ex. eventCategory==search;deviceType==smartphone. Coûteux à calculer : à utiliser avec parcimonie.");
+
+  server.registerTool(
+    "list_reports",
+    {
+      description: `Catalogue des rapports statistiques du site ${cfg.idSite} accessibles par get_report : méthode, nom, catégorie, dimension, métriques, et paramètres (idGoal pour chaque objectif, idDimension pour chaque dimension personnalisée). Statistiques agrégées uniquement : aucune donnée de visite individuelle.`,
+    },
+    run(async () => {
+      const reports = await r.listReports();
+      return json(`${reports.length} rapport(s) disponible(s)`, reports);
+    }),
+  );
+
+  server.registerTool(
+    "list_goals_and_dimensions",
+    { description: "Objectifs (goals) et dimensions personnalisées configurés sur le site, avec leurs ids (idGoal, idDimension) à passer à get_report." },
+    run(async () => json("Objectifs et dimensions personnalisées", await r.listGoalsAndDimensions())),
+  );
+
+  server.registerTool(
+    "get_report",
+    {
+      description: [
+        "Statistiques agrégées d'un rapport Matomo sur une période. Méthodes utiles :",
+        "- trafic : VisitsSummary.get (visites, visiteurs uniques, rebond, durée), VisitFrequency.get (nouveaux / revenants) ;",
+        "- contenu : Actions.getPageUrls, Actions.getEntryPageUrls, Actions.getExitPageUrls, Actions.getOutlinks, Actions.getSiteSearchKeywords ;",
+        "- événements : Events.getCategory, Events.getAction, Events.getName (flat=true pour la ventilation) ;",
+        "- acquisition : Referrers.getReferrerType, Referrers.getWebsites, Referrers.getSocials, Referrers.getCampaigns, Referrers.getAIAssistants ;",
+        "- conversion : Goals.get (id_goal pour un objectif) ; dimensions : CustomDimensions.getCustomDimension (id_dimension) ;",
+        "- audience : DevicesDetection.getType, UserCountry.getRegion, VisitTime.getByDayOfWeek.",
+        "Ids d'objectifs et de dimensions : list_goals_and_dimensions. Catalogue complet : list_reports.",
+      ].join("\n"),
+      inputSchema: {
+        method: z.enum(r.REPORT_METHODS),
+        period,
+        date,
+        segment,
+        limit,
+        flat: z.boolean().optional().describe("Aplatit les sous-tableaux (ex. catégorie → action pour Events.getCategory)"),
+        id_subtable: z.number().int().min(0).optional().describe("Sous-tableau à lire (idsubdatatable d'une ligne)"),
+        id_goal: z.number().int().min(0).optional(),
+        id_dimension: z.number().int().min(1).optional(),
+        filter_pattern: z.string().max(200).optional().describe("Filtre (expression régulière) sur le libellé des lignes"),
+        sort_column: z.string().max(50).optional().describe("Ex. nb_visits, nb_events, nb_hits"),
+        sort_order: z.enum(["asc", "desc"]).optional(),
+      },
+    },
+    run(async (a) => {
+      const data = await r.getReport(a.method, {
+        period: a.period,
+        date: a.date,
+        segment: a.segment,
+        limit: a.limit,
+        flat: a.flat,
+        idSubtable: a.id_subtable,
+        idGoal: a.id_goal,
+        idDimension: a.id_dimension,
+        filterPattern: a.filter_pattern,
+        sortColumn: a.sort_column,
+        sortOrder: a.sort_order,
+      });
+      return json(`${a.method} — ${a.period} ${a.date}${a.segment ? ` — segment ${a.segment}` : ""}`, data);
+    }),
+  );
+
+  server.registerTool(
+    "check_tag_activity",
+    {
+      description: "Croise les balises événement de la version publiée en live avec les événements réellement reçus sur la période : balises qui reçoivent des événements, balises silencieuses (aucun événement : le front ne pousse plus l'événement, ou la balise est mal configurée), balises en pause, balises à catégorie/action dynamique ({{…}}, non vérifiables), et couples catégorie/action reçus sans balise à valeurs fixes (envoyés hors Tag Manager ou par une balise dynamique).",
+      inputSchema: { date: date.optional().default("last30").describe("Période analysée (range) : last30 par défaut, ou 2026-11-01,2026-11-17") },
+    },
+    run(async ({ date: d }) => {
+      const a = await r.checkTagActivity(d);
+      return json(
+        `Version live ${a.idContainerVersion}, période ${a.date} : ${a.withEvents.length} balise(s) avec événements, ${a.silent.length} silencieuse(s), ${a.paused.length} en pause, ${a.dynamic.length} dynamique(s), ${a.untagged.length} couple(s) reçu(s) sans balise fixe`,
+        a,
+      );
     }),
   );
 

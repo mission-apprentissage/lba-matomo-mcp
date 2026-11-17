@@ -127,6 +127,47 @@ describe("appels d'outils", () => {
   });
 });
 
+// ─── statistiques ────────────────────────────────────────────────────────────
+
+describe("outils de statistiques", () => {
+  const STATS = ["list_reports", "list_goals_and_dimensions", "get_report", "check_tag_activity"];
+
+  it("sont exposés en accès lecture", async () => {
+    const names = (await (await connectedClient()).listTools()).tools.map((t) => t.name);
+    expect(names).toEqual(expect.arrayContaining(STATS));
+  });
+
+  it.each(["Live.getLastVisitsDetails", "UserCountry.getLocationFromIP", "API.getBulkRequest", "TagManager.deleteContainerTrigger"])(
+    "get_report refuse %s, sans appel réseau", async (method) => {
+      const calls = mockMatomo({});
+      const client = await connectedClient();
+      const r = await client.callTool({ name: "get_report", arguments: { method, period: "day", date: "yesterday" } }).catch((e: Error) => ({ isError: true, content: [{ text: e.message }] }));
+      expect(r.isError).toBe(true);
+      expect(calls).toHaveLength(0);
+    },
+  );
+
+  it("get_report transmet la requête et renvoie les données masquées", async () => {
+    const calls = mockMatomo({ "Actions.getOutlinks": [{ label: "mailto:contact@example.org", nb_hits: 3 }] });
+    const r = await (await connectedClient()).callTool({ name: "get_report", arguments: { method: "Actions.getOutlinks", period: "week", date: "last4", limit: 10 } });
+    expect(r.isError).toBeFalsy();
+    expect(textOf(r)).toContain("[e-mail masqué]");
+    expect(textOf(r)).not.toContain("contact@example.org");
+    expect(Object.fromEntries(calls[0].body)).toMatchObject({ method: "Actions.getOutlinks", period: "week", date: "last4", filter_limit: "10" });
+  });
+
+  it("check_tag_activity résume le croisement", async () => {
+    mockMatomo({
+      getContainer: CONTAINER,
+      getContainerTags: [{ idtag: 1, name: "search__x", type: "Matomo", status: "active", parameters: { trackingType: "event", eventCategory: "search", eventAction: "x" } }],
+      "Events.getCategory": [],
+    });
+    const t = textOf(await (await connectedClient()).callTool({ name: "check_tag_activity", arguments: {} }));
+    expect(t).toContain("Version live 842, période last30");
+    expect(t).toContain("1 silencieuse(s)");
+  });
+});
+
 // ─── outils d'écriture : chaque champ à sa place ─────────────────────────────
 
 describe("outils d'écriture : snake_case de l'outil vers camelCase de Matomo", () => {

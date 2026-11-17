@@ -5,6 +5,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { z } from "zod";
 import * as m from "./_matomo";
 import * as r from "./_reporting";
+import * as pl from "./_plugins";
 
 type ToolResult = { content: { type: "text"; text: string }[]; isError?: boolean };
 
@@ -219,8 +220,13 @@ export function buildMcpServer(access: m.Access = "read"): McpServer {
         "- événements : Events.getCategory, Events.getAction, Events.getName (flat=true pour la ventilation) ;",
         "- acquisition : Referrers.getReferrerType, Referrers.getWebsites, Referrers.getSocials, Referrers.getCampaigns, Referrers.getAIAssistants ;",
         "- conversion : Goals.get (id_goal pour un objectif) ; dimensions : CustomDimensions.getCustomDimension (id_dimension) ;",
-        "- audience : DevicesDetection.getType, UserCountry.getRegion, VisitTime.getByDayOfWeek.",
-        "Ids d'objectifs et de dimensions : list_goals_and_dimensions. Catalogue complet : list_reports.",
+        "- audience : DevicesDetection.getType, UserCountry.getRegion, VisitTime.getByDayOfWeek ; performance : PagePerformance.get ;",
+        "- parcours : Transitions.getTransitionsForPageUrl (page_url), UsersFlow.getUsersFlowPretty (data_source), Cohorts.getCohorts (metric) ;",
+        "- entonnoirs : Funnels.getMetrics, Funnels.getFunnelFlow, Funnels.getFunnelEntries / getFunnelExits (step) — id_funnel ;",
+        "- formulaires : FormAnalytics.get, getDropOffFields, getFieldTimings, getFieldCorrections… — id_form ;",
+        "- heatmaps : HeatmapSessionRecording.getRecordedHeatmapMetadata, getRecordedHeatmap (heatmap_type, device_type) — id_heatmap ;",
+        "- rapports personnalisés : CustomReports.getCustomReport — id_custom_report.",
+        "Ids d'objectifs et de dimensions : list_goals_and_dimensions. Ids d'entonnoirs, formulaires, heatmaps, rapports : list_analytics_setup. Catalogue : list_reports.",
       ].join("\n"),
       inputSchema: {
         method: z.enum(r.REPORT_METHODS),
@@ -232,6 +238,16 @@ export function buildMcpServer(access: m.Access = "read"): McpServer {
         id_subtable: z.number().int().min(0).optional().describe("Sous-tableau à lire (idsubdatatable d'une ligne)"),
         id_goal: z.number().int().min(0).optional(),
         id_dimension: z.number().int().min(1).optional(),
+        id_funnel: z.number().int().min(0).optional(),
+        id_form: z.number().int().min(1).optional(),
+        id_custom_report: z.number().int().min(1).optional(),
+        id_heatmap: z.number().int().min(1).optional(),
+        heatmap_type: z.union([z.literal(1), z.literal(2), z.literal(3)]).optional().describe("1 mouvement, 2 clic, 3 défilement"),
+        device_type: z.union([z.literal(1), z.literal(2), z.literal(3)]).optional().describe("1 bureau, 2 tablette, 3 mobile"),
+        step: z.number().int().min(1).optional().describe("Étape d'entonnoir"),
+        data_source: z.enum(["page_url", "page_title"]).optional(),
+        page_url: z.string().url().max(2000).optional().describe("Pour Transitions.getTransitionsForPageUrl"),
+        metric: z.string().max(50).optional().describe("Pour Cohorts.getCohorts, ex. nb_visits"),
         filter_pattern: z.string().max(200).optional().describe("Filtre (expression régulière) sur le libellé des lignes"),
         sort_column: z.string().max(50).optional().describe("Ex. nb_visits, nb_events, nb_hits"),
         sort_order: z.enum(["asc", "desc"]).optional(),
@@ -247,12 +263,72 @@ export function buildMcpServer(access: m.Access = "read"): McpServer {
         idSubtable: a.id_subtable,
         idGoal: a.id_goal,
         idDimension: a.id_dimension,
+        idFunnel: a.id_funnel,
+        idForm: a.id_form,
+        idCustomReport: a.id_custom_report,
+        idHeatmap: a.id_heatmap,
+        heatmapType: a.heatmap_type,
+        deviceType: a.device_type,
+        step: a.step,
+        dataSource: a.data_source,
+        pageUrl: a.page_url,
+        metric: a.metric,
         filterPattern: a.filter_pattern,
         sortColumn: a.sort_column,
         sortOrder: a.sort_order,
       });
       return json(`${a.method} — ${a.period} ${a.date}${a.segment ? ` — segment ${a.segment}` : ""}`, data);
     }),
+  );
+
+  const funnelStep = z.object({
+    position: z.number().int().min(1),
+    name: z.string().min(1),
+    pattern_type: z.string().min(1).describe("Valeur de list_analytics_setup kind=funnel_pattern_types"),
+    pattern: z.string().min(1),
+    required: z.boolean().optional(),
+  });
+  const pageRule = z.object({
+    attribute: z.string().min(1).describe("Valeur de list_analytics_setup kind=heatmap_page_rules, ex. url ou path"),
+    type: z.string().min(1).describe("Ex. equals_simple, contains, starts_with, regexp"),
+    value: z.string().min(1),
+    inverted: z.boolean().optional(),
+  });
+
+  server.registerTool(
+    "list_analytics_setup",
+    {
+      description: "Configuration des plugins Matomo du site : entonnoirs (funnels), heatmaps, formulaires suivis (forms), rapports personnalisés (custom_reports), avec un id pour le détail d'un élément. Référentiels pour écrire : funnel_pattern_types, heatmap_page_rules, custom_report_options (types, catégories, dimensions, métriques). Les enregistrements de session ne sont pas accessibles.",
+      inputSchema: { kind: z.enum(pl.SETUP_KINDS), id: z.number().int().min(0).optional() },
+    },
+    run(async ({ kind, id }) => json(`${kind}${id !== undefined ? ` ${id}` : ""}`, await pl.getSetup(kind, id))),
+  );
+
+  server.registerTool(
+    "test_funnel_steps",
+    {
+      description: "Vérifie, sans rien enregistrer, quelles étapes d'entonnoir une URL valide (Funnels.testUrlMatchesSteps). À lancer avant save_funnel.",
+      inputSchema: { url: z.string().url(), steps: z.array(funnelStep).min(1) },
+    },
+    run(async ({ url, steps }) => json(`Test de ${url}`, await pl.testFunnelSteps(url, steps))),
+  );
+
+  server.registerTool(
+    "test_heatmap_page_rules",
+    {
+      description: "Vérifie, sans rien enregistrer, si une URL correspond à des règles de page de heatmap (HeatmapSessionRecording.testUrlMatchPages). À lancer avant save_heatmap.",
+      inputSchema: { url: z.string().url(), rules: z.array(pageRule).min(1) },
+    },
+    run(async ({ url, rules }) => json(`Test de ${url}`, await pl.testHeatmapPageRules(url, rules))),
+  );
+
+  server.registerTool(
+    "list_annotations",
+    {
+      description: "Annotations Matomo du site (notes datées affichées sur les graphiques, dont les publications du conteneur), sans leur auteur.",
+      inputSchema: { period: period.optional().default("range"), date: date.optional().default("last90") },
+    },
+    run(async ({ period: p, date: d }) => json(`Annotations ${p} ${d}`, await pl.listAnnotations(p, d))),
   );
 
   server.registerTool(
@@ -502,6 +578,117 @@ export function buildMcpServer(access: m.Access = "read"): McpServer {
     }),
   );
 
+  const STATS_WRITE = "Modifie la configuration statistique du site (pas le conteneur Tag Manager) : effet immédiat sur la collecte.";
+
+  server.registerTool(
+    "save_funnel",
+    {
+      description: `Crée (sans id_funnel) ou remplace (avec id_funnel) un entonnoir hors objectif. Les étapes fournies remplacent toutes les étapes existantes. Valider d'abord avec test_funnel_steps. ${STATS_WRITE}`,
+      inputSchema: { id_funnel: z.number().int().min(1).optional(), name: z.string().min(1).max(150), steps: z.array(funnelStep).min(1) },
+    },
+    run(async ({ id_funnel, name, steps }) => json(id_funnel ? `Entonnoir ${id_funnel} remplacé` : "Entonnoir créé", await pl.saveFunnel({ id: id_funnel, name, steps }))),
+  );
+
+  server.registerTool(
+    "save_heatmap",
+    {
+      description: `Crée (sans id_heatmap : name et match_page_rules obligatoires) ou modifie une heatmap ; en modification, les champs omis gardent leur valeur. Valider les règles avec test_heatmap_page_rules. ${STATS_WRITE}`,
+      inputSchema: {
+        id_heatmap: z.number().int().min(1).optional(),
+        name: z.string().min(1).max(150).optional(),
+        match_page_rules: z.array(pageRule).min(1).optional(),
+        sample_limit: z.number().int().min(1).optional().describe("Nombre de pages vues à enregistrer (1000 par défaut côté Matomo)"),
+        sample_rate: z.number().min(0.1).max(100).optional().describe("Pourcentage de visites échantillonnées"),
+        excluded_elements: z.string().max(1000).optional().describe("Sélecteurs CSS exclus, séparés par des virgules"),
+        screenshot_url: z.string().url().optional(),
+        breakpoint_mobile: z.number().int().min(0).optional(),
+        breakpoint_tablet: z.number().int().min(0).optional(),
+      },
+    },
+    run(async (a) => {
+      const fields = {
+        name: a.name,
+        matchPageRules: a.match_page_rules,
+        sampleLimit: a.sample_limit,
+        sampleRate: a.sample_rate,
+        excludedElements: a.excluded_elements,
+        screenshotUrl: a.screenshot_url,
+        breakpointMobile: a.breakpoint_mobile,
+        breakpointTablet: a.breakpoint_tablet,
+      };
+      if (a.id_heatmap !== undefined) {
+        await pl.updateHeatmap(a.id_heatmap, fields);
+        return text(`Heatmap ${a.id_heatmap} modifiée`);
+      }
+      if (!fields.name || !fields.matchPageRules) throw new Error("Création : name et match_page_rules sont obligatoires");
+      return text(`Heatmap créée : ${await pl.addHeatmap({ ...fields, name: fields.name, matchPageRules: fields.matchPageRules })}`);
+    }),
+  );
+
+  server.registerTool(
+    "set_heatmap_status",
+    {
+      description: `Met en pause, reprend ou termine (end, définitif : la collecte s'arrête) une heatmap. ${STATS_WRITE}`,
+      inputSchema: { id_heatmap: z.number().int().min(1), action: z.enum(["pause", "resume", "end"]) },
+    },
+    run(async ({ id_heatmap, action }) => {
+      await pl.setHeatmapStatus(id_heatmap, action);
+      return text(`Heatmap ${id_heatmap} : ${action}`);
+    }),
+  );
+
+  server.registerTool(
+    "save_custom_report",
+    {
+      description: `Crée (sans id_custom_report) ou remplace un rapport personnalisé. En remplacement, fournir la définition complète : tous les champs sont remplacés. Valeurs possibles : list_analytics_setup kind=custom_report_options. ${STATS_WRITE}`,
+      inputSchema: {
+        id_custom_report: z.number().int().min(1).optional(),
+        name: z.string().min(1).max(150),
+        report_type: z.string().min(1).describe("Ex. table ou evolution"),
+        metric_ids: z.array(z.string().min(1)).min(1),
+        dimension_ids: z.array(z.string().min(1)).optional(),
+        category_id: z.string().optional(),
+        subcategory_id: z.string().optional(),
+        description: z.string().max(1000).optional(),
+        segment_filter: z.string().max(500).optional(),
+      },
+    },
+    run(async (a) => {
+      const def = {
+        name: a.name,
+        reportType: a.report_type,
+        metricIds: a.metric_ids,
+        dimensionIds: a.dimension_ids,
+        categoryId: a.category_id,
+        subcategoryId: a.subcategory_id,
+        description: a.description,
+        segmentFilter: a.segment_filter,
+      };
+      if (a.id_custom_report !== undefined) {
+        await pl.updateCustomReport(a.id_custom_report, def);
+        return text(`Rapport personnalisé ${a.id_custom_report} remplacé`);
+      }
+      return text(`Rapport personnalisé créé : ${await pl.addCustomReport(def)}`);
+    }),
+  );
+
+  server.registerTool(
+    "add_annotation",
+    {
+      description: "Ajoute une annotation datée sur les graphiques Matomo du site (ex. mise en production, campagne, incident). publish_version en live en ajoute une automatiquement.",
+      inputSchema: {
+        note: z.string().min(1).max(255),
+        date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe("AAAA-MM-JJ ; par défaut aujourd'hui (heure de Paris)"),
+        starred: z.boolean().optional().default(false),
+      },
+    },
+    run(async ({ note, date: d, starred }) => {
+      const day = d ?? pl.todayInParis();
+      await pl.addAnnotation(day, note, starred);
+      return text(`Annotation ajoutée le ${day}`);
+    }),
+  );
+
   server.registerTool(
     "create_version",
     {
@@ -526,7 +713,16 @@ export function buildMcpServer(access: m.Access = "read"): McpServer {
         return { ...text("Refusé : la publication en live demande confirm_live=true, après accord explicite de l'utilisateur."), isError: true };
       }
       await m.publishVersion(id_container_version, environment);
-      return text(`Version ${id_container_version} publiée sur ${environment}`);
+      const done = `Version ${id_container_version} publiée sur ${environment}`;
+      if (environment !== "live") return text(done);
+      // La publication a réussi : un échec d'annotation est signalé sans faire échouer l'outil.
+      try {
+        const day = pl.todayInParis();
+        await pl.addAnnotation(day, `Tag Manager : version ${id_container_version} publiée en live`);
+        return text(`${done}. Annotation ajoutée le ${day}.`);
+      } catch (e) {
+        return text(`${done}. ⚠️ Annotation non ajoutée : ${m.redact(e instanceof Error ? e.message : String(e))}`);
+      }
     }),
   );
 

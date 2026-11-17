@@ -33,6 +33,7 @@ const WRITE_TOOLS = [
   "add_tag", "update_tag", "delete_tag", "pause_tag", "resume_tag",
   "add_variable", "update_variable", "delete_variable",
   "create_version", "publish_version",
+  "save_funnel", "save_heatmap", "set_heatmap_status", "save_custom_report", "add_annotation",
 ];
 
 // ─── outils exposés ──────────────────────────────────────────────────────────
@@ -165,6 +166,92 @@ describe("outils de statistiques", () => {
     const t = textOf(await (await connectedClient()).callTool({ name: "check_tag_activity", arguments: {} }));
     expect(t).toContain("Version live 842, période last30");
     expect(t).toContain("1 silencieuse(s)");
+  });
+});
+
+// ─── plugins et annotations ──────────────────────────────────────────────────
+
+describe("plugins (entonnoirs, heatmaps, formulaires, annotations)", () => {
+  it("lectures exposées en accès lecture", async () => {
+    const names = (await (await connectedClient()).listTools()).tools.map((t) => t.name);
+    expect(names).toEqual(expect.arrayContaining(["list_analytics_setup", "test_funnel_steps", "test_heatmap_page_rules", "list_annotations"]));
+  });
+
+  it("get_report transmet id_funnel à Funnels.getMetrics", async () => {
+    const calls = mockMatomo({ "Funnels.getMetrics": {} });
+    const r = await (await connectedClient()).callTool({ name: "get_report", arguments: { method: "Funnels.getMetrics", period: "month", date: "2026-10-01", id_funnel: 2 } });
+    expect(r.isError).toBeFalsy();
+    expect(Object.fromEntries(calls[0].body)).toMatchObject({ method: "Funnels.getMetrics", idFunnel: "2", idSite: "7" });
+  });
+
+  it("get_report transmet id_heatmap, heatmap_type et device_type", async () => {
+    const calls = mockMatomo({ "HeatmapSessionRecording.getRecordedHeatmap": [] });
+    await (await connectedClient()).callTool({ name: "get_report", arguments: { method: "HeatmapSessionRecording.getRecordedHeatmap", period: "range", date: "last30", id_heatmap: 4, heatmap_type: 2, device_type: 3 } });
+    expect(Object.fromEntries(calls[0].body)).toMatchObject({ idSiteHsr: "4", heatmapType: "2", deviceType: "3" });
+  });
+
+  it.each(["HeatmapSessionRecording.getRecordedSessions", "HeatmapSessionRecording.getRecordedSession"])("get_report refuse %s", async (method) => {
+    const calls = mockMatomo({});
+    const r = await (await connectedClient()).callTool({ name: "get_report", arguments: { method, period: "day", date: "yesterday" } })
+      .catch((e: Error) => ({ isError: true, content: [{ text: e.message }] }));
+    expect(r.isError).toBe(true);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("list_annotations ne renvoie pas l'auteur", async () => {
+    mockMatomo({ "Annotations.getAll": { "7": [{ date: "2026-11-17", note: "v14", user: "someone@example.org", idNote: 1, starred: 0 }] } });
+    const t = textOf(await (await connectedClient()).callTool({ name: "list_annotations", arguments: {} }));
+    expect(t).toContain("v14");
+    expect(t).not.toContain("someone");
+    expect(t).not.toContain('"user"');
+  });
+
+  it("publish_version en live ajoute une annotation datée du jour à Paris", async () => {
+    const calls = mockMatomo({ getContainer: CONTAINER, publishContainerVersion: { result: "success" }, "Annotations.add": { idNote: 1 } });
+    const t = textOf(await (await connectedClient("write")).callTool({ name: "publish_version", arguments: { id_container_version: 900, environment: "live", confirm_live: true } }));
+    expect(t).toContain("Version 900 publiée sur live. Annotation ajoutée");
+    const note = Object.fromEntries(calls.find((c) => c.method === "Annotations.add")!.body);
+    expect(note).toMatchObject({ note: "Tag Manager : version 900 publiée en live", idSite: "7" });
+    expect(note.date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  });
+
+  it("publish_version en live reste un succès si l'annotation échoue, avec un avertissement", async () => {
+    mockMatomo({ getContainer: CONTAINER, publishContainerVersion: { result: "success" }, "Annotations.add": { result: "error", message: "droit manquant" } });
+    const r = await (await connectedClient("write")).callTool({ name: "publish_version", arguments: { id_container_version: 900, environment: "live", confirm_live: true } });
+    expect(r.isError).toBeFalsy();
+    expect(textOf(r)).toContain("publiée sur live");
+    expect(textOf(r)).toContain("⚠️ Annotation non ajoutée");
+    expect(textOf(r)).toContain("droit manquant");
+  });
+
+  it.each(["dev", "staging"])("publish_version sur %s n'ajoute pas d'annotation", async (environment) => {
+    const calls = mockMatomo({ getContainer: CONTAINER, publishContainerVersion: { result: "success" }, "Annotations.add": { idNote: 1 } });
+    await (await connectedClient("write")).callTool({ name: "publish_version", arguments: { id_container_version: 900, environment } });
+    expect(calls.map((c) => c.method)).toContain("publishContainerVersion");
+    expect(calls.map((c) => c.method)).not.toContain("Annotations.add");
+  });
+
+  it("save_heatmap en création exige name et match_page_rules", async () => {
+    const calls = mockMatomo({});
+    const r = await (await connectedClient("write")).callTool({ name: "save_heatmap", arguments: { sample_rate: 5 } });
+    expect(r.isError).toBe(true);
+    expect(textOf(r)).toContain("obligatoires");
+    expect(calls).toHaveLength(0);
+  });
+
+  it("save_funnel transmet les étapes", async () => {
+    const calls = mockMatomo({ "Funnels.saveNonGoalFunnel": { value: 5 } });
+    await (await connectedClient("write")).callTool({ name: "save_funnel", arguments: {
+      name: "Candidature", steps: [{ position: 1, name: "Offre", pattern_type: "path_contains", pattern: "/emploi/" }],
+    } });
+    expect(Object.fromEntries(calls[0].body)).toMatchObject({ idFunnel: "0", funnelName: "Candidature", "steps[0][pattern]": "/emploi/" });
+  });
+
+  it("add_annotation utilise la date du jour par défaut", async () => {
+    const calls = mockMatomo({ "Annotations.add": { idNote: 2 } });
+    const t = textOf(await (await connectedClient("write")).callTool({ name: "add_annotation", arguments: { note: "Campagne rentrée" } }));
+    expect(t).toMatch(/Annotation ajoutée le \d{4}-\d{2}-\d{2}/);
+    expect(calls[0].body.get("note")).toBe("Campagne rentrée");
   });
 });
 

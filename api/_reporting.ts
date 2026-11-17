@@ -2,9 +2,10 @@
 import { request, getContainer, listTags, type Params, type Tag } from "./_matomo";
 
 /**
- * Liste blanche explicite (signatures lues dans Matomo 5.14.1). Exclus volontairement :
- * Live.* (visites individuelles, identifiants de visiteurs), UserCountry.getLocationFromIP,
- * API.getBulkRequest (enchaînerait n'importe quelle méthode) et toute méthode d'écriture.
+ * Liste blanche explicite. Signatures lues dans Matomo 5.14.1 et, pour les plugins premium, dans
+ * listAllAPI de stats.beta.gouv.fr. Exclus volontairement : Live.* et les enregistrements de session
+ * (HeatmapSessionRecording.getRecordedSession*) : visites individuelles ; UserCountry.getLocationFromIP ;
+ * API.getBulkRequest (enchaînerait n'importe quelle méthode) ; toute méthode d'écriture.
  */
 export const REPORT_METHODS = [
   "VisitsSummary.get",
@@ -43,6 +44,27 @@ export const REPORT_METHODS = [
   "VisitTime.getByDayOfWeek",
   "Contents.getContentNames",
   "Contents.getContentPieces",
+  "PagePerformance.get",
+  "Transitions.getTransitionsForPageUrl",
+  "Cohorts.getCohorts",
+  "UsersFlow.getUsersFlowPretty",
+  "UsersFlow.getUsersFlow",
+  "Funnels.getMetrics",
+  "Funnels.getFunnelFlow",
+  "Funnels.getFunnelFlowTable",
+  "Funnels.getFunnelEntries",
+  "Funnels.getFunnelExits",
+  "FormAnalytics.get",
+  "FormAnalytics.getEntryFields",
+  "FormAnalytics.getDropOffFields",
+  "FormAnalytics.getPageUrls",
+  "FormAnalytics.getFieldTimings",
+  "FormAnalytics.getUneededFields",
+  "FormAnalytics.getMostUsedFields",
+  "FormAnalytics.getFieldCorrections",
+  "CustomReports.getCustomReport",
+  "HeatmapSessionRecording.getRecordedHeatmapMetadata",
+  "HeatmapSessionRecording.getRecordedHeatmap",
 ] as const;
 
 export type ReportMethod = (typeof REPORT_METHODS)[number];
@@ -66,6 +88,22 @@ export interface ReportQuery {
   idSubtable?: number;
   idGoal?: number;
   idDimension?: number;
+  idFunnel?: number;
+  idForm?: number;
+  idCustomReport?: number;
+  /** Id d'une heatmap (idSiteHsr). */
+  idHeatmap?: number;
+  /** 1 mouvement, 2 clic, 3 défilement (HeatmapSessionRecording.getAvailableHeatmapTypes). */
+  heatmapType?: 1 | 2 | 3;
+  /** 1 bureau, 2 tablette, 3 mobile (HeatmapSessionRecording.getAvailableDeviceTypes). */
+  deviceType?: 1 | 2 | 3;
+  /** Étape d'un entonnoir (Funnels.getFunnelEntries / getFunnelExits). */
+  step?: number;
+  /** page_url ou page_title (UsersFlow.getAvailableDataSources). */
+  dataSource?: "page_url" | "page_title";
+  pageUrl?: string;
+  /** Métrique de Cohorts.getCohorts, ex. nb_visits. */
+  metric?: string;
   /** filter_limit : 50 par défaut. */
   limit?: number;
   filterPattern?: string;
@@ -91,6 +129,16 @@ export async function getReport<T = unknown>(method: string, q: ReportQuery): Pr
     idSubtable: q.idSubtable,
     idGoal: q.idGoal,
     idDimension: q.idDimension,
+    idFunnel: q.idFunnel,
+    idForm: q.idForm,
+    idCustomReport: q.idCustomReport,
+    idSiteHsr: q.idHeatmap,
+    heatmapType: q.heatmapType,
+    deviceType: q.deviceType,
+    step: q.step,
+    dataSource: q.dataSource,
+    pageUrl: q.pageUrl,
+    metric: q.metric,
     filter_limit: q.limit ?? 50,
     filter_pattern: q.filterPattern,
     filter_sort_column: q.sortColumn,

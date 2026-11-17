@@ -46,8 +46,8 @@ export class MatomoApiError extends Error {
 }
 
 export class ReadOnlyError extends Error {
-  constructor(method: string) {
-    super(`Accès en lecture seule : TagManager.${method} refusé (écriture réservée au secret MCP_WRITE_SECRET)`);
+  constructor(apiMethod: string) {
+    super(`Accès en lecture seule : ${apiMethod} refusé (écriture réservée au secret MCP_WRITE_SECRET)`);
     this.name = "ReadOnlyError";
   }
 }
@@ -88,7 +88,8 @@ export function encodeParams(params: Params): URLSearchParams {
 // ─── masquage des sorties ────────────────────────────────────────────────────
 
 // release_login / created_by contiennent l'identifiant Matomo, une adresse e-mail.
-const REDACTED_KEYS = new Set(["release_login", "created_by", "updated_by", "login", "email", "token_auth"]);
+// user : auteur d'une annotation Matomo.
+const REDACTED_KEYS = new Set(["release_login", "created_by", "updated_by", "login", "email", "token_auth", "user"]);
 const EMAIL_RE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
 export const EMAIL_MASK = "[e-mail masqué]";
 
@@ -115,12 +116,23 @@ function scrubToken(text: string, token: string): string {
 
 type Scope = "global" | "site" | "container";
 
-const WRITE_METHODS = new Set([
-  "addContainerTrigger", "updateContainerTrigger", "deleteContainerTrigger",
-  "addContainerTag", "updateContainerTag", "deleteContainerTag", "pauseContainerTag", "resumeContainerTag",
-  "addContainerVariable", "updateContainerVariable", "deleteContainerVariable",
-  "createContainerVersion", "publishContainerVersion",
+/** Seules écritures que ce serveur peut émettre (nom complet), et seulement avec l'accès en écriture. */
+export const WRITE_METHODS = new Set([
+  ...[
+    "addContainerTrigger", "updateContainerTrigger", "deleteContainerTrigger",
+    "addContainerTag", "updateContainerTag", "deleteContainerTag", "pauseContainerTag", "resumeContainerTag",
+    "addContainerVariable", "updateContainerVariable", "deleteContainerVariable",
+    "createContainerVersion", "publishContainerVersion",
+  ].map((m) => `TagManager.${m}`),
+  "Funnels.saveNonGoalFunnel",
+  "HeatmapSessionRecording.addHeatmap", "HeatmapSessionRecording.updateHeatmap",
+  "HeatmapSessionRecording.pauseHeatmap", "HeatmapSessionRecording.resumeHeatmap", "HeatmapSessionRecording.endHeatmap",
+  "CustomReports.addCustomReport", "CustomReports.updateCustomReport",
+  "Annotations.add",
 ]);
+
+// Toute autre méthode doit être une lecture : un nom hors de ces préfixes est refusé, pour qu'une écriture oubliée dans WRITE_METHODS échoue au lieu de passer.
+const READ_ACTION_RE = /^[A-Z][A-Za-z]*\.(get|export|test)[A-Z]?[A-Za-z]*$/;
 
 /** Appel d'une méthode TagManager (nom court, ex. getContainer). */
 export function call<T = unknown>(method: string, params: Params = {}, scope: Scope = "container"): Promise<T> {
@@ -133,9 +145,9 @@ export function call<T = unknown>(method: string, params: Params = {}, scope: Sc
  */
 export async function request<T = unknown>(apiMethod: string, params: Params = {}, scope: Scope = "container"): Promise<T> {
   const cfg = getConfig();
-  const method = apiMethod.startsWith("TagManager.") ? apiMethod.slice("TagManager.".length) : "";
-  const isWrite = WRITE_METHODS.has(method);
-  if (isWrite && currentAccess() !== "write") throw new ReadOnlyError(method);
+  const isWrite = WRITE_METHODS.has(apiMethod);
+  if (!isWrite && !READ_ACTION_RE.test(apiMethod)) throw new MatomoApiError("méthode ni lecture ni écriture répertoriée : refusée", apiMethod);
+  if (isWrite && currentAccess() !== "write") throw new ReadOnlyError(apiMethod);
   if (!cfg.token) throw new MatomoApiError("MATOMO_TOKEN non configuré", apiMethod);
 
   // Site, conteneur et méthode viennent toujours de la configuration, jamais des paramètres d'un outil.
